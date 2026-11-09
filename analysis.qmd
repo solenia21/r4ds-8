@@ -11,3 +11,87 @@ execute:
 library(tidyverse)
 library(arrow)
 ```
+
+```{r}
+#| cache: true
+markets <- read_parquet("data/markets.parquet")
+
+joined <- open_dataset("data/history.parquet") |>
+  collect() |>
+  left_join(markets, by = "market_id") |>
+  mutate(
+    outcome_numeric    = if_else(outcome == "YES", 1, 0),
+    prediction_error   = abs(probability - outcome_numeric),
+    days_to_resolution = as.numeric(as.Date(ymd_hms(resolved_at)) - date),
+    time_bucket = factor(
+      case_when(
+        days_to_resolution >  90 ~ "90+ days",
+        days_to_resolution >  30 ~ "30–90 days",
+        days_to_resolution >   7 ~ "7–30 days",
+        days_to_resolution >=  1 ~ "1–7 days",
+        TRUE                     ~ "Final day"
+      ),
+      levels = c("90+ days", "30–90 days", "7–30 days", "1–7 days", "Final day"),
+      ordered = TRUE
+    )
+  )
+
+groups        <- read_parquet("data/groups.parquet")
+market_groups <- read_parquet("data/market_groups.parquet")
+```
+
+```{r}
+accuracy <- joined |>
+  group_by(time_bucket) |>
+  summarise(mean_error = mean(prediction_error), n_rows = n(), .groups = "drop")
+
+accuracy
+
+ggplot(accuracy, aes(x = time_bucket, y = mean_error, group = 1)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Prediction markets get smarter near the deadline",
+    subtitle = "Mean absolute error in Manifold Markets forecasts, by days remaining",
+    x = "Days remaining",
+    y = "Mean absolute error"
+  )
+```
+
+```{r}
+resolution_day <- joined |>
+  filter(days_to_resolution == 0)
+
+ggplot(resolution_day, aes(x = probability)) +
+  geom_histogram(binwidth = 0.05, boundary = 0, color = "white") +
+  labs(
+    x = "Forecast probability",
+    y = "Number of snapshots"
+  )
+```
+
+```{r}
+calibration <- resolution_day |>
+  mutate(probability_bin = cut(probability, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE)) |>
+  group_by(probability_bin) |>
+  summarise(
+    predicted_probability = mean(probability),
+    actual_rate = mean(outcome_numeric),
+    n = n(),
+    .groups = "drop"
+  )
+
+calibration
+
+ggplot(calibration, aes(x = predicted_probability, y = actual_rate)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_point(aes(size = n)) +
+  scale_x_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+  scale_y_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+  labs(
+    title = "YES outcomes are rare below 10% and common above 90%",
+    x = "Predicted probability",
+    y = "Actual resolution rate",
+    size = "Markets"
+  )
+```
